@@ -2,8 +2,8 @@ defmodule Maelstrom.Application do
   @moduledoc """
   Main application supervisor for Maelstrom integration.
 
-  This application starts the Maelstrom node which handles the JSON protocol
-  and integrates with VSR for distributed consensus testing.
+  Starts MaelstromKv (VsrServer) and the MaelstromNexus handler
+  which manages stdin/stdout JSON protocol communication.
   """
 
   use Application
@@ -11,8 +11,6 @@ defmodule Maelstrom.Application do
   require Logger
 
   def start(_type, _args) do
-    # loglevel = System.get_env("LOG_LEVEL", "error")
-
     {:ok, handler_config} = :logger.get_handler_config(:default)
     stderr_config = put_in(handler_config, [:config, :type], :standard_error)
 
@@ -22,9 +20,9 @@ defmodule Maelstrom.Application do
     Logger.info("Starting...")
 
     children = [
-      {MaelstromKv, [name: MaelstromKv]},
-      Maelstrom.Stdio,
-      {Task.Supervisor, name: Maelstrom.Supervisor, strategy: :one_for_one}
+      {MaelstromKv, name: MaelstromKv},
+      {MaelstromNexus,
+       {Maelstrom.Handler, name: Maelstrom.Handler, handler_args: [kv: MaelstromKv]}}
     ]
 
     opts = [strategy: :one_for_one, name: Maelstrom.Application]

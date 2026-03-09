@@ -43,8 +43,8 @@ defmodule Vsr.MixProject do
       main: "VsrServer",
       extras: ["README.md", "CHANGELOG.md", "SPECIFICATION.md", "TELEMETRY_EVENTS.md"],
       groups_for_modules: [
-        "Core": [VsrServer],
-        "Messages": [
+        Core: [VsrServer],
+        Messages: [
           Vsr.Message,
           Vsr.Message.ClientRequest,
           Vsr.Message.Prepare,
@@ -57,7 +57,7 @@ defmodule Vsr.MixProject do
           Vsr.Message.NewState,
           Vsr.Message.Heartbeat
         ],
-        "Support": [Vsr.LogEntry, Vsr.Telemetry]
+        Support: [Vsr.LogEntry, Vsr.Telemetry]
       ]
     ]
   end
@@ -100,6 +100,7 @@ defmodule Vsr.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
+      {:maelstrom_nexus, github: "chgeuer/maelstrom_nexus", only: [:maelstrom, :test]},
       {:mox, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ] ++ mcp_tools()

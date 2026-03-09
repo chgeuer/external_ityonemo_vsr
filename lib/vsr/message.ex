@@ -51,7 +51,7 @@ defmodule Vsr.Message do
   # State Transfer Messages
   defmodule GetState do
     @moduledoc "GET-STATE request for state transfer"
-    defstruct [:view, :op_number, :sender]
+    defstruct [:view, :op_number, :sender, :from_op_number]
   end
 
   defmodule NewState do

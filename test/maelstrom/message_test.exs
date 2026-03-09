@@ -1,621 +1,246 @@
-defmodule Maelstrom.Message.MessageTest do
+defmodule Maelstrom.VsrCodecTest do
+  @moduledoc """
+  Tests for VSR struct ↔ plain map conversion via Maelstrom.VsrCodec.
+  """
+
   use ExUnit.Case, async: true
 
   @moduletag :maelstrom
 
-  alias Maelstrom.Message
-  alias Maelstrom.Message.Init
-  alias Maelstrom.Message.Echo
-  alias Maelstrom.Message.Read
-  alias Maelstrom.Message.Write
-  alias Maelstrom.Message.Cas
-  alias Maelstrom.Message.Error
-  alias Vsr.Message.Prepare
-  alias Vsr.Message.PrepareOk
-  alias Vsr.Message.Commit
-  alias Vsr.Message.ClientRequest
-  alias Vsr.Message.Heartbeat
+  alias Maelstrom.VsrCodec
+  alias Vsr.LogEntry
 
-  describe "from_json_map/1" do
-    test "converts Maelstrom init message correctly" do
-      json_map = %{
-        "src" => "c0",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "init",
-          "msg_id" => 1,
-          "node_id" => "n0",
-          "node_ids" => ["n0", "n1", "n2"]
-        }
+  describe "decode/2" do
+    test "decodes prepare message" do
+      body = %{
+        "type" => "prepare",
+        "view" => 1,
+        "op_number" => 5,
+        "operation" => ["write", "key", "value"],
+        "commit_number" => 4,
+        "from" => "client_ref",
+        "leader_id" => "n0"
       }
 
-      result = Message.from_json_map(json_map)
+      result = VsrCodec.decode("prepare", body)
 
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: %Init{
-                 type: :init,
-                 msg_id: 1,
-                 node_id: "n0",
-                 node_ids: ["n0", "n1", "n2"]
-               }
+      assert %Vsr.Message.Prepare{
+               view: 1,
+               op_number: 5,
+               operation: ["write", "key", "value"],
+               commit_number: 4,
+               from: "client_ref",
+               leader_id: "n0"
              } = result
     end
 
-    test "converts Maelstrom init_ok message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "c0",
-        "body" => %{
-          "type" => "init_ok",
-          "in_reply_to" => 1
-        }
+    test "decodes prepare_ok message" do
+      body = %{
+        "type" => "prepare_ok",
+        "view" => 1,
+        "op_number" => 5,
+        "replica" => "n1"
       }
 
-      result = Message.from_json_map(json_map)
+      result = VsrCodec.decode("prepare_ok", body)
 
-      assert %Message{
-               src: "n0",
-               dest: "c0",
-               body: %Init.Ok{
-                 type: :init_ok,
-                 in_reply_to: 1
-               }
+      assert %Vsr.Message.PrepareOk{
+               view: 1,
+               op_number: 5,
+               replica: "n1"
              } = result
     end
 
-    test "converts Maelstrom echo message correctly" do
-      json_map = %{
-        "src" => "c0",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "echo",
-          "msg_id" => 1,
-          "echo" => "Hello, world!"
-        }
+    test "decodes commit message" do
+      body = %{"type" => "commit", "view" => 1, "commit_number" => 5}
+      result = VsrCodec.decode("commit", body)
+      assert %Vsr.Message.Commit{view: 1, commit_number: 5} = result
+    end
+
+    test "decodes heartbeat message" do
+      body = %{"type" => "heartbeat", "view" => 1, "leader_id" => "n0"}
+      result = VsrCodec.decode("heartbeat", body)
+      assert %Vsr.Message.Heartbeat{view: 1, leader_id: "n0"} = result
+    end
+
+    test "decodes client_request message" do
+      body = %{
+        "type" => "client_request",
+        "operation" => ["read", "key"],
+        "from" => "client_ref",
+        "read_only" => true,
+        "client_key" => "unique_key",
+        "client_id" => "test_client",
+        "request_id" => 42
       }
 
-      result = Message.from_json_map(json_map)
+      result = VsrCodec.decode("client_request", body)
 
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: %Echo{
-                 type: :echo,
-                 msg_id: 1,
-                 echo: "Hello, world!"
-               }
+      assert %Vsr.Message.ClientRequest{
+               operation: ["read", "key"],
+               from: "client_ref",
+               read_only: true,
+               client_key: "unique_key",
+               client_id: "test_client",
+               request_id: 42
              } = result
     end
 
-    test "converts Maelstrom echo_ok message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "c0",
-        "body" => %{
-          "type" => "echo_ok",
-          "msg_id" => 2,
-          "in_reply_to" => 1,
-          "echo" => "Hello, world!"
-        }
+    test "decodes new_state message with log entries" do
+      body = %{
+        "type" => "new_state",
+        "view" => 2,
+        "log" => [
+          %{
+            "view" => 1,
+            "op_number" => 1,
+            "operation" => ["write", "k", "v"],
+            "sender_id" => "c0"
+          },
+          %{"view" => 1, "op_number" => 2, "operation" => ["read", "k"], "sender_id" => "c1"}
+        ],
+        "op_number" => 2,
+        "commit_number" => 2,
+        "state_machine_state" => %{"k" => "v"},
+        "leader_id" => "n0"
       }
 
-      result = Message.from_json_map(json_map)
+      result = VsrCodec.decode("new_state", body)
 
-      assert %Message{
-               src: "n0",
-               dest: "c0",
-               body: %Echo.Ok{
-                 type: :echo_ok,
-                 msg_id: 2,
-                 in_reply_to: 1,
-                 echo: "Hello, world!"
-               }
-             } = result
+      assert %Vsr.Message.NewState{view: 2, op_number: 2, commit_number: 2} = result
+      assert [%LogEntry{op_number: 1}, %LogEntry{op_number: 2}] = result.log
     end
 
-    test "converts Maelstrom read message correctly" do
-      json_map = %{
-        "src" => "c0",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "read",
-          "msg_id" => 1,
-          "key" => "foo"
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: %Read{
-                 type: :read,
-                 msg_id: 1,
-                 key: "foo"
-               }
-             } = result
-    end
-
-    test "converts Maelstrom read_ok message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "c0",
-        "body" => %{
-          "type" => "read_ok",
-          "in_reply_to" => 1,
-          "value" => 42
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "c0",
-               body: %Read.Ok{
-                 type: :read_ok,
-                 in_reply_to: 1,
-                 value: 42
-               }
-             } = result
-    end
-
-    test "converts Maelstrom write message correctly" do
-      json_map = %{
-        "src" => "c0",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "write",
-          "msg_id" => 1,
-          "key" => "foo",
-          "value" => "bar"
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: %Write{
-                 type: :write,
-                 msg_id: 1,
-                 key: "foo",
-                 value: "bar"
-               }
-             } = result
-    end
-
-    test "converts Maelstrom write_ok message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "c0",
-        "body" => %{
-          "type" => "write_ok",
-          "in_reply_to" => 1
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "c0",
-               body: %Write.Ok{
-                 type: :write_ok,
-                 in_reply_to: 1
-               }
-             } = result
-    end
-
-    test "converts Maelstrom cas message correctly" do
-      json_map = %{
-        "src" => "c0",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "cas",
-          "msg_id" => 1,
-          "key" => "foo",
-          "from" => "old_value",
-          "to" => "new_value"
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: %Cas{
-                 type: :cas,
-                 msg_id: 1,
-                 key: "foo",
-                 from: "old_value",
-                 to: "new_value"
-               }
-             } = result
-    end
-
-    test "converts Maelstrom cas_ok message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "c0",
-        "body" => %{
-          "type" => "cas_ok",
-          "in_reply_to" => 1
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "c0",
-               body: %Cas.Ok{
-                 type: :cas_ok,
-                 in_reply_to: 1
-               }
-             } = result
-    end
-
-    test "converts Maelstrom error message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "c0",
-        "body" => %{
-          "type" => "error",
-          "in_reply_to" => 1,
-          "code" => 20,
-          "text" => "key does not exist"
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "c0",
-               body: %Error{
-                 type: :error,
-                 in_reply_to: 1,
-                 code: 20,
-                 text: "key does not exist"
-               }
-             } = result
-    end
-
-    test "converts VSR prepare message correctly" do
-      # Generate JSON by encoding a proper struct
-      prepare_message =
-        Message.new("n0", "n1", %Vsr.Message.Prepare{
-          view: 1,
-          op_number: 5,
-          operation: ["write", "key", "value"],
-          commit_number: 4,
-          from: "client_ref",
-          # Required field
-          leader_id: "n0"
-        })
-
-      json_map = JSON.encode!(prepare_message) |> JSON.decode!()
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "n1",
-               body: %Prepare{
-                 view: 1,
-                 op_number: 5,
-                 operation: ["write", "key", "value"],
-                 commit_number: 4,
-                 from: "client_ref",
-                 leader_id: "n0"
-               }
-             } = result
-    end
-
-    test "converts VSR prepare_ok message correctly" do
-      json_map = %{
-        "src" => "n1",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "prepare_ok",
-          "view" => 1,
-          "op_number" => 5,
-          "replica" => "n1"
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n1",
-               dest: "n0",
-               body: %PrepareOk{
-                 view: 1,
-                 op_number: 5,
-                 replica: "n1"
-               }
-             } = result
-    end
-
-    test "converts VSR commit message correctly" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "n1",
-        "body" => %{
-          "type" => "commit",
-          "view" => 1,
-          "commit_number" => 5
-        }
-      }
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "n1",
-               body: %Commit{
-                 view: 1,
-                 commit_number: 5
-               }
-             } = result
-    end
-
-    test "converts VSR client_request message correctly" do
-      # Generate JSON by encoding a proper struct
-      client_request_message =
-        Message.new("c0", "n0", %Vsr.Message.ClientRequest{
-          operation: ["read", "key"],
-          from: "client_ref",
-          read_only: true,
-          client_key: "unique_key",
-          # Required field
-          client_id: "test_client",
-          # Required field
-          request_id: 42
-        })
-
-      json_map = JSON.encode!(client_request_message) |> JSON.decode!()
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: %ClientRequest{
-                 operation: ["read", "key"],
-                 from: "client_ref",
-                 read_only: true,
-                 client_key: "unique_key",
-                 client_id: "test_client",
-                 request_id: 42
-               }
-             } = result
-    end
-
-    test "converts VSR heartbeat message correctly" do
-      # Generate JSON by encoding a proper struct
-      heartbeat_message =
-        Message.new("n0", "n1", %Vsr.Message.Heartbeat{
-          # Required field
-          view: 1,
-          # Required field
-          leader_id: "n0"
-        })
-
-      json_map = JSON.encode!(heartbeat_message) |> JSON.decode!()
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "n1",
-               body: %Heartbeat{
-                 view: 1,
-                 leader_id: "n0"
-               }
-             } = result
-    end
-
-    test "handles complex nested data structures" do
-      # Generate JSON by encoding a proper struct
-      complex_prepare_message =
-        Message.new("n0", "n1", %Vsr.Message.Prepare{
-          view: 1,
-          op_number: 5,
-          operation: %{"type" => "write", "key" => "foo", "value" => %{"nested" => true}},
-          commit_number: 4,
-          from: %{"client" => "test", "ref" => "abc123"},
-          # Required field
-          leader_id: "n0"
-        })
-
-      json_map = JSON.encode!(complex_prepare_message) |> JSON.decode!()
-
-      result = Message.from_json_map(json_map)
-
-      assert %Message{
-               src: "n0",
-               dest: "n1",
-               body: %Prepare{
-                 view: 1,
-                 op_number: 5,
-                 operation: %{"type" => "write", "key" => "foo", "value" => %{"nested" => true}},
-                 commit_number: 4,
-                 from: %{"client" => "test", "ref" => "abc123"},
-                 leader_id: "n0"
-               }
-             } = result
-    end
-
-    test "raises when message type is unknown" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "n1",
-        "body" => %{
-          "type" => "unknown_message_type",
-          "field" => "value"
-        }
-      }
-
+    test "raises on unknown message type" do
       assert_raise KeyError, fn ->
-        Message.from_json_map(json_map)
+        VsrCodec.decode("unknown_type", %{"type" => "unknown_type"})
       end
     end
 
-    test "raises when required field is missing" do
-      json_map = %{
-        "src" => "n0",
-        "dest" => "n1",
-        "body" => %{
-          "type" => "init",
-          "msg_id" => 1
-          # node_id and node_ids are missing
-        }
-      }
-
+    test "raises on missing required field" do
       assert_raise KeyError, fn ->
-        Message.from_json_map(json_map)
+        VsrCodec.decode("prepare", %{"type" => "prepare", "view" => 1})
       end
     end
   end
 
-  describe "new/3" do
-    test "creates message with Maelstrom body" do
-      body = %Init{type: :init, msg_id: 1, node_id: "n0", node_ids: ["n0"]}
-      message = Maelstrom.Message.new("c0", "n0", body)
-
-      assert %Message{
-               src: "c0",
-               dest: "n0",
-               body: ^body
-             } = message
-    end
-
-    test "creates message with VSR body" do
-      body = %Prepare{
+  describe "encode/1" do
+    test "encodes prepare message" do
+      prepare = %Vsr.Message.Prepare{
         view: 1,
         op_number: 5,
         operation: ["write", "key", "value"],
         commit_number: 4,
-        from: "ref"
+        from: "client_ref",
+        leader_id: "n0"
       }
 
-      message = Maelstrom.Message.new("n0", "n1", body)
+      result = VsrCodec.encode(prepare)
 
-      assert %Message{
-               src: "n0",
-               dest: "n1",
-               body: ^body
-             } = message
+      assert result["type"] == "prepare"
+      assert result["view"] == 1
+      assert result["op_number"] == 5
+      assert result["operation"] == ["write", "key", "value"]
+      assert result["commit_number"] == 4
+      assert result["from"] == "client_ref"
+      assert result["leader_id"] == "n0"
+    end
+
+    test "encodes heartbeat message" do
+      heartbeat = %Vsr.Message.Heartbeat{view: 1, leader_id: "n0"}
+      result = VsrCodec.encode(heartbeat)
+
+      assert result["type"] == "heartbeat"
+      assert result["view"] == 1
+      assert result["leader_id"] == "n0"
+    end
+
+    test "encodes new_state with log entries" do
+      new_state = %Vsr.Message.NewState{
+        view: 2,
+        log: [
+          %LogEntry{view: 1, op_number: 1, operation: ["write", "k", "v"], sender_id: "c0"}
+        ],
+        op_number: 1,
+        commit_number: 1,
+        state_machine_state: %{"k" => "v"},
+        leader_id: "n0"
+      }
+
+      result = VsrCodec.encode(new_state)
+
+      assert result["type"] == "new_state"
+
+      assert [%{"view" => 1, "op_number" => 1, "operation" => ["write", "k", "v"]}] =
+               result["log"]
+    end
+
+    test "all string keys in encoded output" do
+      commit = %Vsr.Message.Commit{view: 1, commit_number: 5}
+      result = VsrCodec.encode(commit)
+
+      assert Enum.all?(Map.keys(result), &is_binary/1)
     end
   end
 
-  describe "JSON encoding" do
-    test "Maelstrom messages can be JSON encoded" do
-      init = %Init{type: :init, msg_id: 1, node_id: "n0", node_ids: ["n0", "n1"]}
-      message = Maelstrom.Message.new("c0", "n0", init)
-
-      json_string = JSON.encode!(message)
-      decoded = JSON.decode!(json_string)
-
-      assert %{
-               "src" => "c0",
-               "dest" => "n0",
-               "body" => %{
-                 "type" => "init",
-                 "msg_id" => 1,
-                 "node_id" => "n0",
-                 "node_ids" => ["n0", "n1"]
-               }
-             } = decoded
-    end
-
-    test "VSR messages can be JSON encoded" do
-      from_tuple = {self(), make_ref()}
-      from_hash = :erlang.phash2(from_tuple)
-
-      prepare = %Prepare{
+  describe "round-trip" do
+    test "prepare round-trip" do
+      original = %Vsr.Message.Prepare{
         view: 1,
         op_number: 5,
         operation: ["write", "key", "value"],
         commit_number: 4,
-        # Use hash instead of tuple for JSON encoding
-        from: from_hash
+        from: %{"node" => "n0", "from" => 12345},
+        leader_id: "n0"
       }
 
-      message = Maelstrom.Message.new("n0", "n1", prepare)
+      encoded = VsrCodec.encode(original)
+      decoded = VsrCodec.decode("prepare", encoded)
 
-      json_string = JSON.encode!(message)
-      decoded = JSON.decode!(json_string)
-
-      assert %{
-               "src" => "n0",
-               "dest" => "n1",
-               "body" => %{
-                 "type" => "prepare",
-                 "view" => 1,
-                 "op_number" => 5,
-                 "operation" => ["write", "key", "value"],
-                 "commit_number" => 4,
-                 "from" => ^from_hash
-               }
-             } = decoded
-
-      # Note: The from_tuple to from_hash translation is now handled by MaelstromKv's ETS table
-      # This test just verifies that the JSON encoding/decoding works correctly with hashes
-      assert is_integer(from_hash)
+      assert decoded.view == original.view
+      assert decoded.op_number == original.op_number
+      assert decoded.operation == original.operation
+      assert decoded.commit_number == original.commit_number
+      assert decoded.from == original.from
+      assert decoded.leader_id == original.leader_id
     end
-  end
 
-  describe "round-trip conversion" do
-    test "Maelstrom init message round-trip" do
-      original_json = %{
-        "src" => "c0",
-        "dest" => "n0",
-        "body" => %{
-          "type" => "init",
-          "msg_id" => 1,
-          "node_id" => "n0",
-          "node_ids" => ["n0", "n1", "n2"]
-        }
+    test "new_state round-trip preserves log entries" do
+      original = %Vsr.Message.NewState{
+        view: 2,
+        log: [
+          %LogEntry{view: 1, op_number: 1, operation: ["write", "k", "v"], sender_id: "c0"},
+          %LogEntry{view: 1, op_number: 2, operation: ["read", "k"], sender_id: "c1"}
+        ],
+        op_number: 2,
+        commit_number: 2,
+        state_machine_state: %{"k" => "v"},
+        leader_id: "n0"
       }
 
-      message = Message.from_json_map(original_json)
-      encoded = JSON.encode!(message)
-      decoded = JSON.decode!(encoded)
+      encoded = VsrCodec.encode(original)
+      decoded = VsrCodec.decode("new_state", encoded)
 
-      assert decoded == original_json
+      assert length(decoded.log) == 2
+      assert Enum.at(decoded.log, 0).op_number == 1
+      assert Enum.at(decoded.log, 1).op_number == 2
     end
 
-    test "VSR prepare message round-trip" do
-      # Generate JSON by encoding a proper struct  
-      from_hash = 123_456_789
+    test "encoded output is Jason-serializable" do
+      prepare = %Vsr.Message.Prepare{
+        view: 1,
+        op_number: 5,
+        operation: ["write", "key", "value"],
+        commit_number: 4,
+        from: %{"node" => "n0", "from" => 12345},
+        leader_id: "n0"
+      }
 
-      original_message =
-        Message.new("n0", "n1", %Vsr.Message.Prepare{
-          view: 1,
-          op_number: 5,
-          operation: ["write", "key", "value"],
-          commit_number: 4,
-          from: from_hash,
-          # Required field
-          leader_id: "n0"
-        })
+      encoded = VsrCodec.encode(prepare)
+      json = Jason.encode!(encoded)
+      decoded_json = Jason.decode!(json)
 
-      # Test round-trip: struct -> JSON -> struct
-      encoded = JSON.encode!(original_message)
-      decoded_json = JSON.decode!(encoded)
-      message = Message.from_json_map(decoded_json)
-      re_encoded = JSON.encode!(message)
-      re_decoded = JSON.decode!(re_encoded)
-
-      assert re_decoded == decoded_json
+      assert decoded_json == encoded
     end
   end
 end

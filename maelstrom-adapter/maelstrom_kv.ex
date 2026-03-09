@@ -1,221 +1,79 @@
 defmodule MaelstromKv do
   @moduledoc """
-  Maelstrom-compatible Key-Value store with integrated VSR consensus and JSON protocol handling.
+  VSR-backed key-value store for Maelstrom integration.
 
-  This module combines the functionality of the old Maelstrom.Node and implements:
-  - VSR consensus protocol for distributed consistency
-  - Maelstrom JSON message protocol over STDIN/STDOUT
-  - DETS-based durable log storage
-  - Key-value operations (read, write, cas)
+  Implements VsrServer callbacks for distributed consensus and delegates
+  all Maelstrom protocol I/O to MaelstromNexus via `Maelstrom.Handler`.
+
+  In test mode (no nexus), works with standard GenServer.call/reply.
+  In Maelstrom mode, uses MaelstromNexus.reply/send_msg/error_reply for I/O.
   """
 
   use VsrServer
   require Logger
 
-  # Maelstrom message types
-  alias Maelstrom.Message
-  alias Maelstrom.Message.Init
-  alias Maelstrom.Message.Echo
-  alias Maelstrom.Message.Read
-  alias Maelstrom.Message.Write
-  alias Maelstrom.Message.Cas
-  alias Maelstrom.Message.ForwardedReply
+  alias Maelstrom.VsrCodec
 
   defstruct [
     :from_table,
-    dets_root: ".",
-    data: %{},
-    msg_id_counter: 0
+    nexus: Maelstrom.Handler,
+    data: %{}
   ]
 
-  @type state :: %__MODULE__{
+  @type t :: %__MODULE__{
           from_table: :ets.tid() | nil,
-          data: %{term() => term()},
-          msg_id_counter: non_neg_integer(),
-          dets_root: Path.t()
+          nexus: GenServer.server(),
+          data: %{term() => term()}
         }
 
   # Client API
+
   def start_link(opts \\ []) do
     VsrServer.start_link(__MODULE__, opts)
   end
 
   # VsrServer callbacks
+
   def init(opts) do
-    # Create ETS table for GenServer.from translation (private, store reference)
     from_table_ref = :ets.new(__MODULE__, [:set, :private])
-    dets_opts = Keyword.take(opts, [:dets_root])
-    inner_state = struct!(__MODULE__, [from_table: from_table_ref] ++ dets_opts)
-    # Return VSR-compatible init tuple without a log.  Log will be set on init.
+    nexus = Keyword.get(opts, :nexus, Maelstrom.Handler)
+    inner_state = %__MODULE__{from_table: from_table_ref, nexus: nexus}
     {:ok, inner_state}
   end
 
-  # Client API functions for Maelstrom protocol (convenience wrappers)
-  def echo(server, echo_value, from, msg_id) do
-    echo_msg = %Echo{echo: echo_value, msg_id: msg_id}
-
-    from
-    |> Message.new(VsrServer.node_id(server), echo_msg)
-    |> then(&message(server, &1))
-  end
-
   # VsrServer callback for sending VSR messages over Maelstrom network
-  def send_vsr(dest_node_id, vsr_message, _inner_state) do
-    # Get the current node ID from VSR server
-    current_node_id = VsrServer.node_id()
-
-    # Create Maelstrom message with VSR message as body
-    # VSR messages already implement JSON.Encoder, so they can be directly encoded
-
-    current_node_id
-    |> Message.new(dest_node_id, vsr_message)
-    |> JSON.encode!()
-    |> tap(&Logger.debug("Sending VSR message: #{&1}"))
-    |> IO.puts()
+  def send_vsr(dest_node_id, vsr_message, inner_state) do
+    body = VsrCodec.encode(vsr_message)
+    MaelstromNexus.send_msg(inner_state.nexus, dest_node_id, body)
   end
 
-  def read(server, key, from, msg_id) do
-    read_msg = %Read{key: key, msg_id: msg_id}
-
-    from
-    |> Message.new(VsrServer.node_id(server), read_msg)
-    |> then(&message(server, &1))
+  # Client reply callback - handles both test mode (GenServer.from tuple) and Maelstrom mode
+  def send_reply(from, reply, _vsr_state) when is_tuple(from) do
+    GenServer.reply(from, reply)
   end
 
-  def write(server, key, value, from, msg_id) do
-    write_msg = %Write{key: key, value: value, msg_id: msg_id}
-
-    from
-    |> Message.new(VsrServer.node_id(server), write_msg)
-    |> then(&message(server, &1))
-  end
-
-  def cas(server, key, from_value, to_value, from, msg_id) do
-    cas_msg = %Cas{key: key, from: from_value, to: to_value, msg_id: msg_id}
-
-    from
-    |> Message.new(VsrServer.node_id(server), cas_msg)
-    |> then(&message(server, &1))
-  end
-
-  # Direct maelstrom message handling
-  def message(server \\ __MODULE__, message)
-
-  def message(server, message) when is_binary(message) do
-    message
-    |> JSON.decode!()
-    |> Message.from_json_map()
-    |> then(&message(server, &1))
-  end
-
-  def message(server, message) do
-    Logger.debug("Node Received message: #{JSON.encode!(message)}")
-
-    server
-    |> GenServer.call({:message, message}, 20_000)
-    |> tap(&Logger.debug("Node Processed message: #{inspect(&1)}"))
-  end
-
-  # Maelstrom message handlers (integrated from Maelstrom.Node)
-
-  defp do_init(%{node_id: node_id, node_ids: node_ids}, _from, state) do
-    Logger.info("Initializing Maelstrom node #{node_id} with cluster: #{inspect(node_ids)}")
-
-    # Initialize VSR cluster with the provided node list
-    # Calculate other replicas (excluding self)
-    other_replicas = Enum.reject(node_ids, &(&1 == node_id))
-    cluster_size = length(node_ids)
-    VsrServer.set_cluster(self(), node_id, other_replicas, cluster_size)
-
-    # Open or create DETS table
-    table_name = String.to_atom("maelstrom_log_#{node_id}")
-    dets_file = Path.join(state.dets_root, "#{node_id}.dets")
-    {:ok, log} = :dets.open_file(table_name, file: String.to_charlist(dets_file))
-    VsrServer.set_log(self(), log)
-
-    # Return state unchanged - node info handled at protocol level
-    {:reply, :ok, state}
-  end
-
-  defp do_echo(%{msg_id: msg_id} = echo, _from, state) do
-    Logger.debug("Echoing message #{msg_id} with content: #{echo}")
-    new_msg_id = state.msg_id_counter + 1
-    {:reply, %{msg_id: new_msg_id}, %{state | msg_id_counter: new_msg_id}}
-  end
-
-  defp request_with(value, from, state) do
-    from_hash = push_from(state, from)
-    # Get node_id from VsrServer (not stored in MaelstromKv state)
-    node_id = VsrServer.node_id(self())
-    encoded_from = %{"node" => node_id, "from" => from_hash}
-    {:client_request, encoded_from, value}
-  end
-
-  defp do_read(%{key: key}, from, state) do
-    {:noreply, state, request_with(["read", key], from, state)}
-  end
-
-  defp do_write(%{key: key, value: value}, from, state) do
-    {:noreply, state, request_with(["write", key, value], from, state)}
-  end
-
-  defp do_cas(%{key: key, from: cas_from, to: to}, from, state) do
-    {:noreply, state, request_with(["cas", key, cas_from, to], from, state)}
-  end
-
-  defp do_forwarded_reply(%{from_hash: from_hash} = forwarded_reply, _from, state) do
-    # Decode the base64 encoded reply back to Erlang term
-    decoded_reply = ForwardedReply.decode_reply(forwarded_reply)
-    # Get the from_tuple from our ETS table and reply
-    local_reply(state, from_hash, decoded_reply)
-    {:reply, :ok, state}
-  end
-
-  defp read_impl(key, state) do
-    value = Map.get(state.data, key)
-    result = if value, do: {:ok, value}, else: {:error, :not_found}
-    {state, result}
-  end
-
-  defp write_impl(key, value, state) do
-    new_data = Map.put(state.data, key, value)
-    new_state = %{state | data: new_data}
-    {new_state, :ok}
-  end
-
-  defp cas_impl(key, from_value, to_value, state) do
-    current_value = Map.get(state.data, key)
-
-    if current_value == from_value do
-      new_data = Map.put(state.data, key, to_value)
-      new_state = %{state | data: new_data}
-      {new_state, :ok}
-    else
-      # CAS failed - precondition not met
-      {state, {:error, :precondition_failed}}
-    end
-  end
-
-  def send_reply(%{"node" => node_id, "from" => from_hash}, reply, state) do
+  def send_reply(%{"node" => node_id, "from" => from_hash}, reply, inner_state) do
     if node_id == VsrServer.node_id() do
-      local_reply(state, from_hash, reply)
+      local_reply(inner_state, from_hash, reply)
     else
-      VsrServer.node_id()
-      |> Message.new(node_id, %ForwardedReply{from_hash: from_hash, reply: reply})
-      |> JSON.encode!()
-      |> IO.puts()
+      encoded_reply = Base.encode64(:erlang.term_to_binary(reply))
+
+      MaelstromNexus.send_msg(inner_state.nexus, node_id, %{
+        "type" => "forwarded_reply",
+        "from_hash" => from_hash,
+        "reply" => encoded_reply
+      })
     end
   end
 
   def get_state(state), do: state.data
-
   def set_state(state, data), do: %{state | data: data}
 
-  # Required log callback implementations for DETS storage
+  ## Log callback implementations for DETS storage
+
   def log_append(log, entry) do
-    table_name = log
-    :ok = :dets.insert(table_name, {entry.op_number, entry})
-    :ok = :dets.sync(table_name)
+    :ok = :dets.insert(log, {entry.op_number, entry})
+    :ok = :dets.sync(log)
     log
   end
 
@@ -255,64 +113,102 @@ defmodule MaelstromKv do
     log
   end
 
-  # ETS translation layer for GenServer.from ↔ {node_id, from_hash} mapping
+  ## VSR commit handler
 
-  @doc """
-  Store a GenServer.from tuple in ETS and return a hash for Maelstrom transmission.
-  """
-  def push_from(state, from_tuple) do
-    from_hash = :erlang.phash2(from_tuple)
-    :ets.insert(state.from_table, {from_hash, from_tuple})
-    from_hash
-  end
-
-  @doc """
-  Retrieve a GenServer.from tuple from ETS using the hash.
-  """
-  def local_reply(%{from_table: from_table}, from_hash, reply) do
-    case :ets.lookup(from_table, from_hash) do
-      [{^from_hash, from}] ->
-        :ets.delete(from_table, from_hash)
-        GenServer.reply(from, reply)
-
-      [] ->
-        Logger.error("reply failed, could not find hash #{from_hash}")
-    end
-  end
-
-  ## ROUTER
-
-  # VSR commit handler for Maelstrom operations
   def handle_commit(["read", key], state), do: read_impl(key, state)
   def handle_commit(["write", key, value], state), do: write_impl(key, value, state)
 
   def handle_commit(["cas", key, from_value, to_value], state),
     do: cas_impl(key, from_value, to_value, state)
 
-  # No other commit messages are acknowledged.
+  ## Client API for tests (standard GenServer.call path)
 
-  # Handle Maelstrom JSON protocol messages
-  def handle_call({:message, message}, from, state) do
-    Logger.debug("Received Maelstrom message: #{JSON.encode!(message)}")
+  @doc "Reads a value from the key-value store."
+  def read(server, key) do
+    GenServer.call(server, {:client_request, ["read", key]})
+  end
 
-    case message.body do
-      %Init{} = init ->
-        do_init(init, from, state)
+  @doc "Writes a value to the key-value store."
+  def write(server, key, value) do
+    GenServer.call(server, {:client_request, ["write", key, value]})
+  end
 
-      %Echo{} = echo ->
-        do_echo(echo, from, state)
+  @doc "Compare-and-swap operation on the key-value store."
+  def cas(server, key, from_value, to_value) do
+    GenServer.call(server, {:client_request, ["cas", key, from_value, to_value]})
+  end
 
-      %Read{} = read ->
-        do_read(read, from, state)
+  # GenServer.call handler for test mode
+  def handle_call({:client_request, operation}, from, state) do
+    {:noreply, state, {:client_request, from, operation}}
+  end
 
-      %Write{} = write ->
-        do_write(write, from, state)
+  ## Maelstrom request handlers (cast from Handler)
 
-      %Cas{} = cas ->
-        do_cas(cas, from, state)
+  def handle_cast({:maelstrom_request, type, operation, original_msg}, state) do
+    from_hash = :erlang.phash2(make_ref())
+    :ets.insert(state.from_table, {from_hash, {type, original_msg}})
 
-      %ForwardedReply{} = forwarded_reply ->
-        do_forwarded_reply(forwarded_reply, from, state)
+    node_id = VsrServer.node_id(self())
+    encoded_from = %{"node" => node_id, "from" => from_hash}
+
+    {:noreply, state, {:client_request, encoded_from, operation}}
+  end
+
+  def handle_cast({:forwarded_reply, from_hash, encoded_reply}, state) do
+    reply = :erlang.binary_to_term(Base.decode64!(encoded_reply))
+    local_reply(state, from_hash, reply)
+    {:noreply, state}
+  end
+
+  ## Private helpers
+
+  defp read_impl(key, state) do
+    value = Map.get(state.data, key)
+    result = if value, do: {:ok, value}, else: {:error, :not_found}
+    {state, result}
+  end
+
+  defp write_impl(key, value, state) do
+    new_data = Map.put(state.data, key, value)
+    {%{state | data: new_data}, :ok}
+  end
+
+  defp cas_impl(key, from_value, to_value, state) do
+    current_value = Map.get(state.data, key)
+
+    if current_value == from_value do
+      new_data = Map.put(state.data, key, to_value)
+      {%{state | data: new_data}, :ok}
+    else
+      {state, {:error, :precondition_failed}}
     end
   end
+
+  defp local_reply(%{from_table: from_table, nexus: nexus}, from_hash, reply) do
+    case :ets.lookup(from_table, from_hash) do
+      [{^from_hash, {type, original_msg}}] ->
+        :ets.delete(from_table, from_hash)
+
+        case build_reply(type, reply) do
+          {:ok, body} ->
+            MaelstromNexus.reply(nexus, original_msg, body)
+
+          {:error, code, text} ->
+            MaelstromNexus.error_reply(nexus, original_msg, code, text)
+        end
+
+      [] ->
+        Logger.error("reply failed, could not find hash #{from_hash}")
+    end
+  end
+
+  defp build_reply("read", {:ok, value}), do: {:ok, %{"type" => "read_ok", "value" => value}}
+  defp build_reply("read", {:error, :not_found}), do: {:error, 20, "key not found"}
+  defp build_reply("read", {:error, :not_primary}), do: {:error, 11, "not primary"}
+  defp build_reply("write", :ok), do: {:ok, %{"type" => "write_ok"}}
+  defp build_reply("write", {:error, reason}), do: {:error, 13, "write failed: #{reason}"}
+  defp build_reply("cas", :ok), do: {:ok, %{"type" => "cas_ok"}}
+  defp build_reply("cas", {:error, :precondition_failed}), do: {:error, 22, "precondition failed"}
+  defp build_reply("cas", {:error, reason}), do: {:error, 13, "cas failed: #{reason}"}
 end
