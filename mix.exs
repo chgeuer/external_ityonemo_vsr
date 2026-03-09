@@ -100,7 +100,7 @@ defmodule Vsr.MixProject do
   defp deps do
     [
       {:telemetry, "~> 1.0"},
-      {:maelstrom_nexus, github: "chgeuer/maelstrom_nexus", only: [:maelstrom, :test]},
+      {:maelstrom_nexus, github: "chgeuer/maelstrom_nexus", tag: "v0.1.0", only: [:maelstrom, :test]},
       {:mox, "~> 1.0", only: :test},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ] ++ mcp_tools()
